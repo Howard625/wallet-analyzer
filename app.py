@@ -347,9 +347,9 @@ if fetch_btn or "df_tx" in st.session_state:
                             with c2:
                                 # Swap strings now include USD directly from build_swap_summaries
                                 if swap["spent"]:
-                                    st.write(f"🔴 -{swap['spent']}")
+                                    st.markdown(f"🔴 -{swap['spent']}")
                                 if swap["received"]:
-                                    st.write(f"🟢 +{swap['received']}")
+                                    st.markdown(f"🟢 +{swap['received']}")
                             with c3:
                                 explorer_url = CHAIN_EXPLORER.get(chain_tag, "")
                                 if explorer_url:
@@ -526,9 +526,9 @@ if fetch_btn or "df_tx" in st.session_state:
                                 unsafe_allow_html=True,
                             )
                             if swap["spent"]:
-                                st.write(f"🔴 -{swap['spent']}")
+                                st.markdown(f"🔴 -{swap['spent']}")
                             if swap["received"]:
-                                st.write(f"🟢 +{swap['received']}")
+                                st.markdown(f"🟢 +{swap['received']}")
                             st.caption(f"tx: {tx_link}")
                         else:
                             # Non-swap tx — show ERC20 transfers and approvals with counterparty
@@ -542,12 +542,12 @@ if fetch_btn or "df_tx" in st.session_state:
                                     for _, t in outs.iterrows():
                                         usd_str = f" (${t['value_usd']:,.2f})" if t["value_usd"] > 0 else ""
                                         to_label = label_or_short(t["to"]) if t["to"] else ""
-                                        st.write(f"🔴 -{t['amount']:,.4f} {t['token_symbol']}{usd_str} → {to_label}")
+                                        st.markdown(f"🔴 -{t['amount']:,.4f} {t['token_symbol']}{usd_str} → {to_label}")
                                 if not ins.empty:
                                     for _, t in ins.iterrows():
                                         usd_str = f" (${t['value_usd']:,.2f})" if t["value_usd"] > 0 else ""
                                         from_label_t = label_or_short(t["from"]) if t["from"] else ""
-                                        st.write(f"🟢 +{t['amount']:,.4f} {t['token_symbol']}{usd_str} ← {from_label_t}")
+                                        st.markdown(f"🟢 +{t['amount']:,.4f} {t['token_symbol']}{usd_str} ← {from_label_t}")
                             else:
                                 # Check for Approval events
                                 has_approval = False
@@ -565,6 +565,8 @@ if fetch_btn or "df_tx" in st.session_state:
                                         amount_raw = params.get("value", "0")
                                         decimals = log.get("sender_contract_decimals", 0) or 0
                                         amount = float(amount_raw) / (10 ** decimals) if amount_raw else 0
+                                        if amount == 0:
+                                            continue
                                         if amount > 1e15:
                                             amt_str = "∞"
                                         else:

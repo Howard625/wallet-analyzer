@@ -593,6 +593,8 @@ def build_swap_summaries(df: pd.DataFrame, wallet: str, transfers: pd.DataFrame 
         # Build spent/received strings with USD
         spent_parts = []
         for sym, amt in all_outs.items():
+            if amt < 0.0001:  # Skip dust amounts
+                continue
             usd = tx_token_usd.get(tx_hash, {}).get(f"{sym.upper()}_out", 0)
             if sym.upper() in STABLECOIN_SYMBOLS and usd == 0:
                 usd = amt  # stablecoin = $1
@@ -601,6 +603,8 @@ def build_swap_summaries(df: pd.DataFrame, wallet: str, transfers: pd.DataFrame 
         
         received_parts = []
         for sym, amt in all_ins.items():
+            if amt < 0.0001:  # Skip dust amounts
+                continue
             usd = tx_token_usd.get(tx_hash, {}).get(f"{sym.upper()}_in", 0)
             if sym.upper() in STABLECOIN_SYMBOLS and usd == 0:
                 usd = amt

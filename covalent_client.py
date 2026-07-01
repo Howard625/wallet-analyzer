@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Iterator
 
 import requests
 from dotenv import load_dotenv
@@ -15,6 +14,163 @@ API_KEY = os.environ["COVALENT_API_KEY"]
 BASE = "https://api.covalenthq.com/v1"
 SESSION = requests.Session()
 SESSION.headers.update({"Authorization": f"Bearer {API_KEY}"})
+
+# Etherscan V2 API key (for address label lookup)
+ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
+ETHERSCAN_CHAIN_IDS = {
+    "eth-mainnet": 1,
+    "bsc-mainnet": 56,
+    "base-mainnet": 8453,
+    "arbitrum-mainnet": 42161,
+    "optimism-mainnet": 10,
+    "polygon-mainnet": 137,
+    "avalanche-mainnet": 43114,
+}
+
+# Moralis API key (for address label lookup on BSC)
+MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY", "")
+MORALIS_CHAIN_MAP = {
+    "eth-mainnet": "eth",
+    "bsc-mainnet": "bsc",
+    "base-mainnet": "base",
+    "arbitrum-mainnet": "arbitrum",
+    "optimism-mainnet": "optimism",
+    "polygon-mainnet": "polygon",
+    "avalanche-mainnet": "avalanche",
+}
+
+# Runtime cache for dynamically fetched labels
+_dynamic_labels: dict[str, str | None] = {}
+
+
+def fetch_address_label(address: str, chain: str) -> str | None:
+    """Fetch address label from Etherscan V2 API or Moralis API.
+    Returns label string or None. Cached in memory after first lookup.
+    """
+    if not address:
+        return None
+    addr_lower = address.lower()
+    cache_key = f"{chain}:{addr_lower}"
+    if cache_key in _dynamic_labels:
+        return _dynamic_labels[cache_key]
+
+    # Try Etherscan first (ETH only on free tier)
+    label = _fetch_etherscan_label(address, chain)
+    if label:
+        _dynamic_labels[cache_key] = label
+        return label
+
+    # Try Moralis (works for BSC and others)
+    label = _fetch_moralis_label(address, chain)
+    _dynamic_labels[cache_key] = label
+    return label
+
+
+def _fetch_etherscan_label(address: str, chain: str) -> str | None:
+    if not ETHERSCAN_API_KEY:
+        return None
+    chain_id = ETHERSCAN_CHAIN_IDS.get(chain)
+    if not chain_id:
+        return None
+    try:
+        url = f"https://api.etherscan.io/v2/api?chainid={chain_id}&module=account&action=addresstag&address={address}"
+        r = SESSION.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") == "1":
+                result = data.get("result", "")
+                if result and result != "-":
+                    return result
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_moralis_label(address: str, chain: str) -> str | None:
+    """Fetch address label from Moralis wallet history API.
+    Searches recent transactions for this address and extracts labels.
+    """
+    if not MORALIS_API_KEY:
+        return None
+    moralis_chain = MORALIS_CHAIN_MAP.get(chain)
+    if not moralis_chain:
+        return None
+    try:
+        # Use Moralis wallet history to find labels for this address
+        url = f"https://deep-index.moralis.io/api/v2.2/wallets/{address}/history?chain={moralis_chain}&limit=5"
+        r = SESSION.get(url, headers={"X-API-Key": MORALIS_API_KEY, "Accept": "application/json"}, timeout=15)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        results = data.get("result", [])
+        for tx in results:
+            # Check tx-level labels
+            if tx.get("from_address", "").lower() == address.lower() and tx.get("from_address_label"):
+                return tx["from_address_label"]
+            if tx.get("to_address", "").lower() == address.lower() and tx.get("to_address_label"):
+                return tx["to_address_label"]
+            # Check erc20 transfer labels
+            for t in tx.get("erc20_transfers", []):
+                if t.get("from_address", "").lower() == address.lower() and t.get("from_address_label"):
+                    return t["from_address_label"]
+                if t.get("to_address", "").lower() == address.lower() and t.get("to_address_label"):
+                    return t["to_address_label"]
+            # Check native transfer labels
+            for t in tx.get("native_transfers", []):
+                if t.get("from_address", "").lower() == address.lower() and t.get("from_address_label"):
+                    return t["from_address_label"]
+                if t.get("to_address", "").lower() == address.lower() and t.get("to_address_label"):
+                    return t["to_address_label"]
+    except Exception:
+        pass
+    return None
+
+
+def fetch_moralis_labels_batch(address: str, chain: str, max_pages: int = 3) -> dict[str, str]:
+    """Batch fetch labels from Moralis wallet history for a wallet.
+    Returns {address_lower: label} dict.
+    More efficient than per-address lookups — one API call gets labels for
+    all counterparties in the wallet's recent transactions.
+    """
+    if not MORALIS_API_KEY:
+        return {}
+    moralis_chain = MORALIS_CHAIN_MAP.get(chain)
+    if not moralis_chain:
+        return {}
+
+    labels = {}
+    cursor = None
+    for _ in range(max_pages):
+        url = f"https://deep-index.moralis.io/api/v2.2/wallets/{address}/history?chain={moralis_chain}&limit=100"
+        if cursor:
+            url += f"&cursor={cursor}"
+        try:
+            r = SESSION.get(url, headers={"X-API-Key": MORALIS_API_KEY, "Accept": "application/json"}, timeout=20)
+            if r.status_code != 200:
+                break
+            data = r.json()
+            results = data.get("result", [])
+            for tx in results:
+                # TX level
+                for prefix in ("from", "to"):
+                    addr = tx.get(f"{prefix}_address")
+                    label = tx.get(f"{prefix}_address_label")
+                    if addr and label:
+                        labels[addr.lower()] = label
+                # Transfer level
+                for field in ("erc20_transfers", "native_transfers"):
+                    for t in tx.get(field, []):
+                        for prefix in ("from", "to"):
+                            addr = t.get(f"{prefix}_address")
+                            label = t.get(f"{prefix}_address_label")
+                            if addr and label:
+                                labels[addr.lower()] = label
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        except Exception:
+            break
+    return labels
 
 
 @dataclass
@@ -47,12 +203,12 @@ def fetch_transactions(
     max_pages: int | None = None,
     start_block: int | None = None,
     end_block: int | None = None,
-) -> Iterator[dict]:
-    """Yield raw tx items for an address on a chain.
+) -> tuple[list[dict], str]:
+    """Yield (tx_items, resolved_address) for an address on a chain.
 
     chain: e.g. 'eth-mainnet', 'bsc-mainnet', 'base-mainnet'
     address: 0x... or ENS
-    Pagination via Covalent's page-based scheme.
+    Returns (list_of_tx_items, resolved_address_string).
     """
     url = f"{BASE}/{chain}/address/{address}/transactions_v3/"
     params = {"page-size": page_size}
@@ -62,36 +218,40 @@ def fetch_transactions(
         params["ending-block"] = end_block
 
     pages = 0
+    resolved_address = address
+    all_items = []
     while url:
         data = _get(url, params=params)
         body = data.get("data", {})
+        if pages == 0:
+            resolved_address = body.get("address", address)
         items = body.get("items", [])
-        for it in items:
-            yield it
+        all_items.extend(items)
         pages += 1
         if max_pages and pages >= max_pages:
             break
-        # follow pagination link
+        # Follow pagination link to OLDER transactions.
         links = body.get("links", {})
-        next_url = links.get("next")
-        if not next_url:
+        prev_url = links.get("prev")
+        if not prev_url:
             break
-        url = next_url
-        params = None  # next_url already has query string
+        url = prev_url
+        params = None
+    return all_items, resolved_address
 
 
-def fetch_token_transfers(chain: str, address: str, page_size: int = 500) -> Iterator[dict]:
-    """Fetch ERC-20/721 transfers for an address. Covalent exposes this via the
-    same transactions_v3 endpoint — log_events with decoded Transfer events.
-    We pull tx history and extract transfer logs. For heavy wallets, consider
-    the bulk endpoint or filtering by block range."""
-    for tx in fetch_transactions(chain, address, page_size=page_size):
+def fetch_token_transfers(chain: str, address: str, page_size: int = 500) -> list[dict]:
+    """Fetch ERC-20/721 transfers for an address."""
+    items, _ = fetch_transactions(chain, address, page_size=page_size)
+    result = []
+    for tx in items:
         for log in tx.get("log_events", []) or []:
             decoded = log.get("decoded")
             if not decoded:
                 continue
             if decoded.get("name") == "Transfer":
-                yield _normalize_transfer(log, tx)
+                result.append(_normalize_transfer(log, tx))
+    return result
 
 
 def _normalize_transfer(log: dict, tx: dict) -> dict:
@@ -113,5 +273,7 @@ def _normalize_transfer(log: dict, tx: dict) -> dict:
 
 if __name__ == "__main__":
     # quick smoke test
-    for tx in fetch_transactions("eth-mainnet", "vitalik.eth", page_size=5, max_pages=1):
+    items, resolved = fetch_transactions("eth-mainnet", "vitalik.eth", page_size=5, max_pages=1)
+    print(f"resolved: {resolved}")
+    for tx in items:
         print(tx["block_signed_at"], tx["tx_hash"][:18], "logs:", len(tx.get("log_events") or []))

@@ -657,11 +657,21 @@ if fetch_btn or "df_tx" in st.session_state:
 
         # --- Export ---
         st.divider()
-        st.download_button(
-            "📥 Download transfers as CSV",
-            tf_window.to_csv(index=False),
-            file_name=f"transfers_{address}_{start_dt}_{end_dt}.csv",
-            mime="text/csv",
-        )
+        if st.session_state.get("drill_entity"):
+            # Filtered view: only download the filtered token's transfers
+            entity_name = st.session_state["drill_entity"]
+            st.download_button(
+                f"📥 Download {entity_name} transfers as CSV",
+                drilled.to_csv(index=False),
+                file_name=f"transfers_{address}_{entity_name}_{start_dt}_{end_dt}.csv",
+                mime="text/csv",
+            )
+        else:
+            st.download_button(
+                "📥 Download transfers as CSV",
+                tf_window.to_csv(index=False),
+                file_name=f"transfers_{address}_{start_dt}_{end_dt}.csv",
+                mime="text/csv",
+            )
 else:
     st.info("Enter a wallet address, select chains, and click **Fetch & Analyze** to start.")

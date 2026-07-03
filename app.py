@@ -20,7 +20,7 @@ from analyzer import (
     get_first_fund,
     unified_ranking,
 )
-from labels import label_or_short
+from labels import label_or_short, get_label
 
 # --- Page config ---
 st.set_page_config(
@@ -112,6 +112,16 @@ def _parse_swap_tokens(swap_str: str) -> list[tuple[str, float]]:
             except ValueError:
                 pass
     return results
+
+
+def _address_link(addr: str) -> str:
+    """Return full address with label if available."""
+    if not addr:
+        return ""
+    label = get_label(addr)
+    if label:
+        return f"{label}\n({addr})"
+    return addr
 
 
 def _token_in_swap(swap_str: str, token_symbol: str) -> bool:
@@ -541,13 +551,23 @@ if fetch_btn or "df_tx" in st.session_state:
                                 if not outs.empty:
                                     for _, t in outs.iterrows():
                                         usd_str = f" (${t['value_usd']:,.2f})" if t["value_usd"] > 0 else ""
-                                        to_label = label_or_short(t["to"]) if t["to"] else ""
-                                        st.markdown(f"🔴 -{t['amount']:,.4f} {t['token_symbol']}{usd_str} → {to_label}")
+                                        cp_addr = t["to"] or ""
+                                        cp_display = _address_link(cp_addr)
+                                        st.markdown(f"🔴 -{t['amount']:,.4f} {t['token_symbol']}{usd_str}")
+                                        st.caption(f"→ {cp_display}")
+                                        if st.button(f"🔍 Analyze {cp_addr[:10]}...", key=f"btn_out_{t['tx_hash']}_{t.name}"):
+                                            st.session_state["pending_address"] = cp_addr
+                                            st.rerun()
                                 if not ins.empty:
                                     for _, t in ins.iterrows():
                                         usd_str = f" (${t['value_usd']:,.2f})" if t["value_usd"] > 0 else ""
-                                        from_label_t = label_or_short(t["from"]) if t["from"] else ""
-                                        st.markdown(f"🟢 +{t['amount']:,.4f} {t['token_symbol']}{usd_str} ← {from_label_t}")
+                                        cp_addr = t["from"] or ""
+                                        cp_display = _address_link(cp_addr)
+                                        st.markdown(f"🟢 +{t['amount']:,.4f} {t['token_symbol']}{usd_str}")
+                                        st.caption(f"← {cp_display}")
+                                        if st.button(f"🔍 Analyze {cp_addr[:10]}...", key=f"btn_in_{t['tx_hash']}_{t.name}"):
+                                            st.session_state["pending_address"] = cp_addr
+                                            st.rerun()
                             else:
                                 # Check for Approval events
                                 has_approval = False
@@ -579,10 +599,17 @@ if fetch_btn or "df_tx" in st.session_state:
                                         is_out = (tx["from"] or "").lower() == resolved_addr.lower()
                                         direction = "🔴" if is_out else "🟢"
                                         sign = "-" if is_out else "+"
-                                        cp = to_lbl if is_out else from_lbl
-                                        st.write(f"{direction} {sign}{val_eth:.4f} {native_sym} (${tx['value_quote']:.2f}) { '→ ' + cp if cp else ''}")
+                                        cp_addr = (tx["to"] if is_out else tx["from"]) or ""
+                                        cp_display = _address_link(cp_addr)
+                                        st.markdown(f"{direction} {sign}{val_eth:.4f} {native_sym} (${tx['value_quote']:.2f})")
+                                        st.caption(f"{'→' if is_out else '←'} {cp_display}")
+                                        if st.button(f"🔍 Analyze {cp_addr[:10]}...", key=f"btn_native_{tx_hash}"):
+                                            st.session_state["pending_address"] = cp_addr
+                                            st.rerun()
                                     else:
-                                        st.write(f"📎 {from_lbl} → {to_lbl}")
+                                        from_display = _address_link(tx["from"])
+                                        to_display = _address_link(tx["to"])
+                                        st.caption(f"📎 {from_display} → {to_display}")
                             
                             st.caption(f"tx: {tx_link}")
 

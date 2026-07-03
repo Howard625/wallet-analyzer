@@ -15,6 +15,7 @@ ROUTERS = {
     "0x7a250d5630b4cf539739df2c5dacb4c659f2488d": "Uniswap V2 Router",
     "0xe592427a0aece92de3edee1f18e0157c05861564": "Uniswap V3 Router",
     "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45": "Uniswap V3 Router 2",
+    "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df": "Uniswap V4 Pool Manager",
     # PancakeSwap (BSC)
     "0x10ed43c718714eb63d5aa57278b585f78be99afc": "PancakeSwap V2 Router",
     "0x13f4ea83d0bd40e75c8222255bc855a974568dd4": "PancakeSwap V3 Router",
@@ -39,6 +40,16 @@ AGGREGATORS = {
     "0x62ccef0b4545166f721caa9fee13c1d3767e27dc": "OKX DEX",
     "0x11481d39c651f4acd974a260e3ec19e1b2a0923d": "OKX DEX Router",
     "0x3156020dff8d99af1ddc523ebdfb1ad2018554a0": "OKX Labs DEX",
+    "0x7a7ad9aa93cd0a2d0255326e5fb145cec14997ff": "OKX DEX",
+    # Binance DEX
+    "0xb300000b72deaeb607a12d5f54773d1c19c7028d": "Binance DEX",
+    # PancakeSwap (additional)
+    "0x5c952063c7fc8610ffdb798152d69f0b9550762b": "PancakeSwap",
+    "0x172fcd41e0913e95784454622d1c3724f546f849": "PancakeSwap",
+    # Uniswap V3 (additional)
+    "0x47a90a2d92a8367a91efa1906bfc8c1e05bf10c4": "Uniswap V3",
+    # Bitget DEX
+    "0xbc1d9760bd6ca468ca9fb5ff2cfbeac35d86c973": "Bitget DEX",
     # 0x (matcha)
     "0xdef1c0ded9bec7dc1d174a623906c26ef4f5f8c1": "0x Exchange Proxy",
     # Paraswap

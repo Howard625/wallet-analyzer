@@ -187,6 +187,7 @@ if fetch_btn or "df_tx" in st.session_state:
         st.session_state["drill_entity"] = None
         st.session_state["drill_type"] = None
         st.session_state["show_trace"] = False
+        st.session_state["tx_page"] = 0
     else:
         df_tx = st.session_state["df_tx"]
         df_transfers = st.session_state["df_transfers"]
@@ -447,6 +448,31 @@ if fetch_btn or "df_tx" in st.session_state:
                         )
                         st.plotly_chart(fig_flow, use_container_width=True)
 
+                # --- Custom token search ---
+                st.divider()
+                # All tokens present in transfers (not just ranked ones)
+                all_tokens = sorted(tf_window["token_symbol"].dropna().unique())
+                search_col1, search_col2 = st.columns([3, 1])
+                with search_col1:
+                    custom_token = st.text_input(
+                        "🔍 Search a specific token (symbol)",
+                        placeholder="e.g. USDT, O, ZEST...",
+                        key="custom_token_search",
+                    )
+                with search_col2:
+                    st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
+                    if st.button("Filter", key="custom_filter_btn", use_container_width=True):
+                        if custom_token.strip():
+                            matched = [t for t in all_tokens if str(t).upper() == custom_token.strip().upper()]
+                            if matched:
+                                st.session_state["drill_entity"] = matched[0]
+                                st.session_state["drill_type"] = "token"
+                                st.rerun()
+                            else:
+                                st.warning(f"Token '{custom_token}' not found in this wallet's transfers.")
+                if all_tokens:
+                    st.caption(f"Available tokens ({len(all_tokens)}): {', '.join(str(t) for t in all_tokens[:40])}{'...' if len(all_tokens) > 40 else ''}")
+
                 # --- Top 20 cards ---
                 st.divider()
                 top20 = ranking.head(20)
@@ -508,8 +534,23 @@ if fetch_btn or "df_tx" in st.session_state:
                 st.divider()
                 st.subheader("📋 All Transactions")
 
-                display_count = min(100, len(tx_window))
-                for _, tx in tx_window.head(display_count).iterrows():
+                # Pagination
+                PAGE_SIZE = 20
+                total_txs = len(tx_window)
+                total_pages = max(1, (total_txs + PAGE_SIZE - 1) // PAGE_SIZE)
+                
+                if "tx_page" not in st.session_state:
+                    st.session_state["tx_page"] = 0
+                # Reset page if out of range (e.g. new address fetched)
+                if st.session_state["tx_page"] >= total_pages:
+                    st.session_state["tx_page"] = 0
+                
+                current_page = st.session_state["tx_page"]
+                start_idx = current_page * PAGE_SIZE
+                end_idx = start_idx + PAGE_SIZE
+                page_txs = tx_window.iloc[start_idx:end_idx]
+                
+                for _, tx in page_txs.iterrows():
                     time_str = tx["block_signed_at"].strftime("%Y-%m-%d %H:%M:%S")
                     from_lbl = label_or_short(tx["from"])
                     to_lbl = label_or_short(tx["to"])
@@ -654,6 +695,28 @@ if fetch_btn or "df_tx" in st.session_state:
                 },
             )
             st.caption(f"{len(tx_window)} txs in selected timeframe.")
+
+            # Pagination controls
+            if total_pages > 1:
+                    pcol1, pcol2, pcol3, pcol4, pcol5 = st.columns([1, 1, 2, 1, 1])
+                    with pcol1:
+                        if st.button("⏮ First", key="pg_first"):
+                            st.session_state["tx_page"] = 0
+                            st.rerun()
+                    with pcol2:
+                        if st.button("◀ Prev", key="pg_prev") and current_page > 0:
+                            st.session_state["tx_page"] -= 1
+                            st.rerun()
+                    with pcol3:
+                        st.markdown(f"<div style='text-align:center;padding-top:8px'>Page **{current_page + 1}** / {total_pages} &nbsp; (showing {start_idx+1}-{min(end_idx, total_txs)} of {total_txs})</div>", unsafe_allow_html=True)
+                    with pcol4:
+                        if st.button("Next ▶", key="pg_next") and current_page < total_pages - 1:
+                            st.session_state["tx_page"] += 1
+                            st.rerun()
+                    with pcol5:
+                        if st.button("Last ⏭", key="pg_last"):
+                            st.session_state["tx_page"] = total_pages - 1
+                            st.rerun()
 
         # --- Export ---
         st.divider()

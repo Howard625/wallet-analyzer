@@ -10,13 +10,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.environ["COVALENT_API_KEY"]
+# Support both .env (local) and Streamlit secrets (cloud)
+try:
+    import streamlit as st
+    _secrets = st.secrets
+    API_KEY = _secrets.get("COVALENT_API_KEY", os.environ.get("COVALENT_API_KEY", ""))
+    ETHERSCAN_API_KEY = _secrets.get("ETHERSCAN_API_KEY", os.environ.get("ETHERSCAN_API_KEY", ""))
+    MORALIS_API_KEY = _secrets.get("MORALIS_API_KEY", os.environ.get("MORALIS_API_KEY", ""))
+except Exception:
+    API_KEY = os.environ.get("COVALENT_API_KEY", "")
+    ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
+    MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY", "")
+
 BASE = "https://api.covalenthq.com/v1"
 SESSION = requests.Session()
 SESSION.headers.update({"Authorization": f"Bearer {API_KEY}"})
 
 # Etherscan V2 API key (for address label lookup)
-ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
 ETHERSCAN_CHAIN_IDS = {
     "eth-mainnet": 1,
     "bsc-mainnet": 56,
@@ -28,7 +38,6 @@ ETHERSCAN_CHAIN_IDS = {
 }
 
 # Moralis API key (for address label lookup on BSC)
-MORALIS_API_KEY = os.environ.get("MORALIS_API_KEY", "")
 MORALIS_CHAIN_MAP = {
     "eth-mainnet": "eth",
     "bsc-mainnet": "bsc",
@@ -238,6 +247,36 @@ def fetch_transactions(
         url = prev_url
         params = None
     return all_items, resolved_address
+
+
+# Cache internal transfers per (chain, tx_hash) to avoid duplicate API calls
+_internal_tx_cache: dict[str, list[dict]] = {}
+
+
+def fetch_internal_transfers(chain: str, tx_hash: str) -> list[dict]:
+    """Fetch native-token internal transfers for a single transaction.
+
+    Uses Covalent's transaction_v2 endpoint with `with-internal=true`, which
+    returns native (e.g. BNB/ETH) internal transfers that are NOT present in
+    log_events. Each item: {from_address, to_address, value, gas_limit}.
+    Cached per (chain, tx_hash). Returns [] on any error.
+    """
+    if not tx_hash:
+        return []
+    key = f"{chain}:{tx_hash.lower()}"
+    if key in _internal_tx_cache:
+        return _internal_tx_cache[key]
+    result: list[dict] = []
+    try:
+        url = f"{BASE}/{chain}/transaction_v2/{tx_hash}/"
+        data = _get(url, params={"with-internal": "true"})
+        items = (data.get("data") or {}).get("items") or []
+        if items:
+            result = items[0].get("internal_transfers") or []
+    except Exception:
+        result = []
+    _internal_tx_cache[key] = result
+    return result
 
 
 def fetch_token_transfers(chain: str, address: str, page_size: int = 500) -> list[dict]:

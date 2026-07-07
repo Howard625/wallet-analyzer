@@ -809,6 +809,54 @@ def build_swap_summaries(df: pd.DataFrame, wallet: str, transfers: pd.DataFrame 
         if not all_outs and not all_ins:
             continue
 
+        # --- Aggregator swaps: recover a missing spent/received leg. ---
+        # OKX/1inch-style aggregators often pull the user's input token (or pay
+        # the output token) via router-internal transfers, so the wallet has no
+        # DIRECT out (or in) leg. Infer the missing leg from the token that the
+        # aggregator (tx.to) net-moved the most of, excluding the leg we already
+        # have. The amount is best-effort (sum through the aggregator).
+        agg = (first["to"] or "").lower()
+        est_syms = set()
+        if (not all_outs) != (not all_ins) and agg:
+            have_syms = {s.upper() for s in {**all_outs, **all_ins}}
+            # Aggregate token flow through the aggregator address
+            agg_out = {}   # aggregator -> X  (candidate: wallet paid this, in USD terms)
+            agg_in = {}    # X -> aggregator
+            for _, tx in tx_group.iterrows():
+                for log in (tx["log_events"] or []):
+                    dec = log.get("decoded")
+                    if not dec or dec.get("name") != "Transfer":
+                        continue
+                    pr = {p["name"]: p["value"] for p in (dec.get("params") or []) if p.get("name")}
+                    fa = (pr.get("from") or "").lower()
+                    ta = (pr.get("to") or "").lower()
+                    sym = log.get("sender_contract_ticker_symbol") or ""
+                    if not sym or sym.upper() in have_syms:
+                        continue
+                    decm = log.get("sender_contract_decimals", 0) or 0
+                    amt = _to_float(_to_dec(pr.get("value"), decm))
+                    if amt == 0:
+                        continue
+                    if fa == agg:
+                        agg_out[sym] = agg_out.get(sym, 0) + amt
+                    if ta == agg:
+                        agg_in[sym] = agg_in.get(sym, 0) + amt
+            if not all_outs:
+                # Missing SPENT leg: wallet received something, paid an input.
+                # The input token is what the aggregator net-received the most of.
+                cand = agg_in or agg_out
+                if cand:
+                    sym = max(cand, key=cand.get)
+                    all_outs[sym] = cand[sym]
+                    est_syms.add(sym.upper())
+                    est_spent_sym = sym
+            elif not all_ins:
+                cand = agg_out or agg_in
+                if cand:
+                    sym = max(cand, key=cand.get)
+                    all_ins[sym] = cand[sym]
+                    est_syms.add(sym.upper())
+
         dex_label = get_label(first["to"]) or ""
         dex_name = dex_label or (first["to"][:10] + "..." if first["to"] else "")
 
@@ -821,7 +869,8 @@ def build_swap_summaries(df: pd.DataFrame, wallet: str, transfers: pd.DataFrame 
             if sym.upper() in STABLECOIN_SYMBOLS and usd == 0:
                 usd = amt  # stablecoin = $1
             usd_str = f" (${usd:,.2f})" if usd > 0 else ""
-            spent_parts.append(f"{amt:,.4f} {sym}{usd_str}")
+            est_str = " ~est" if sym.upper() in est_syms else ""
+            spent_parts.append(f"{amt:,.4f} {sym}{usd_str}{est_str}")
         
         received_parts = []
         for sym, amt in all_ins.items():
@@ -831,7 +880,8 @@ def build_swap_summaries(df: pd.DataFrame, wallet: str, transfers: pd.DataFrame 
             if sym.upper() in STABLECOIN_SYMBOLS and usd == 0:
                 usd = amt
             usd_str = f" (${usd:,.2f})" if usd > 0 else ""
-            received_parts.append(f"{amt:,.4f} {sym}{usd_str}")
+            est_str = " ~est" if sym.upper() in est_syms else ""
+            received_parts.append(f"{amt:,.4f} {sym}{usd_str}{est_str}")
 
         spent_str = " + ".join(spent_parts) if spent_parts else ""
         received_str = " + ".join(received_parts) if received_parts else ""

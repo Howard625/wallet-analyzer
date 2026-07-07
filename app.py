@@ -671,6 +671,19 @@ if fetch_btn or "df_tx" in st.session_state:
                                 st.markdown(f"🔴 -{swap['spent']}")
                             if swap["received"]:
                                 st.markdown(f"🟢 +{swap['received']}")
+                            # Clickable token filters for each token in the swap.
+                            swap_syms = []
+                            for _sym, _amt in (_parse_swap_tokens(swap["spent"]) + _parse_swap_tokens(swap["received"])):
+                                if _sym and _sym not in swap_syms:
+                                    swap_syms.append(_sym)
+                            if swap_syms:
+                                tcols = st.columns(min(len(swap_syms), 4))
+                                for _i, _sym in enumerate(swap_syms):
+                                    with tcols[_i % len(tcols)]:
+                                        if st.button(f"📊 {_sym}", key=f"tok_swap_{tx_hash}_{_sym}", help=f"Filter all {_sym} transfers"):
+                                            st.session_state["drill_entity"] = _sym
+                                            st.session_state["drill_type"] = "token"
+                                            st.rerun()
                             st.caption(f"tx: {tx_link}")
                         else:
                             # Non-swap tx — show ERC20 transfers and approvals with counterparty

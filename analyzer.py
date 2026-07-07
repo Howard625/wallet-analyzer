@@ -15,8 +15,23 @@ from decimal import Decimal
 import pandas as pd
 import requests
 
-from covalent_client import fetch_transactions, fetch_moralis_labels_batch
-from labels import get_label
+from covalent_client import fetch_transactions, fetch_moralis_labels_batch, fetch_internal_transfers
+from labels import get_label, ROUTERS, AGGREGATORS, BRIDGES
+
+# Addresses that act as routing intermediaries (bridges, routers, aggregators).
+# When a wallet's tx `to` is one of these, the tx is a routed/bridged action:
+# the real counterparty is this intermediary, and funds may be forwarded on to
+# a final recipient via internal transactions.
+INTERMEDIARY_ADDRESSES = {
+    a.lower() for a in list(ROUTERS) + list(AGGREGATORS) + list(BRIDGES)
+}
+
+# Bridges specifically. A bridge "Call Message In" often performs internal
+# swaps + native internal transfers to the final recipient, so bridge txns get
+# priority classification (even when Swap logs are present) and native
+# internal-transfer resolution. Plain DEX routers/aggregators are NOT included
+# here, so the wallet's own direct swaps still classify as 'dex_swap'.
+BRIDGE_ADDRESSES = {a.lower() for a in BRIDGES}
 
 # Chain mapping for DexScreener
 DEXSCREENER_CHAIN_MAP = {
@@ -158,7 +173,17 @@ def fetch_token_prices(contracts: set, chains: list[str]) -> dict[str, float]:
 
 
 def _classify_tx(tx: dict) -> str:
-    """Classify a transaction: 'dex_swap', 'native_transfer', or 'other'."""
+    """Classify a transaction: 'bridge', 'dex_swap', 'native_transfer', or 'other'.
+
+    Bridge/router detection takes priority: bridges frequently perform internal
+    swaps, so a Swap log alone does not mean the wallet did a direct DEX swap.
+    If the tx `to` is a known bridge/router/aggregator intermediary, classify
+    as 'bridge' so we resolve the real recipient (incl. native internal
+    transfers) and tag the intermediary as the counterparty.
+    """
+    tx_to = (tx.get("to_address") or "").lower()
+    if tx_to in BRIDGE_ADDRESSES:
+        return "bridge"
     logs = tx.get("log_events") or []
     for log in logs:
         decoded = log.get("decoded")
@@ -224,6 +249,149 @@ def _extract_swap_transfers(tx: dict, wallet_lower: str) -> list[dict]:
             "direction": "out" if from_addr == wallet_lower else "in",
             "amount": amount,
         })
+
+    return transfers
+
+
+def _extract_bridge_transfers(tx: dict, wallet_lower: str, chain: str | None = None,
+                              native_price: float = 0.0, native_sym: str = "ETH") -> list[dict]:
+    """For a bridge / routed call, resolve the real from -> to and tag the bridge.
+
+    Pattern (e.g. Butter Bridge "Call Message In"):
+      wallet initiates a tx to a bridge/router contract (tx.to = intermediary).
+      The bridge forwards value on to a FINAL recipient via a chain of internal
+      transfers. We want to show:
+        from = wallet (tx initiator)
+        to   = final recipient of the routed funds
+        counterparty label (leftmost) = the bridge/router intermediary
+
+    We follow the ERC20 Transfer chain and pick the last hop's `to` that is NOT
+    an intermediary as the final recipient. Only emit when the wallet is the
+    tx initiator (out) or the ultimate recipient (in).
+
+    If the wallet is NOT present in any ERC20 hop (common when the bridge
+    delivers NATIVE tokens, e.g. BNB, via internal transfers that are absent
+    from log_events), we fetch the tx's native internal transfers and detect
+    whether the wallet received/sent native value, tagging the bridge as the
+    counterparty.
+    """
+    tx_from = (tx.get("from_address") or "").lower()
+    tx_to = tx.get("to_address")            # the bridge/router (original case)
+    tx_to_lower = (tx_to or "").lower()
+    tx_hash = tx.get("tx_hash")
+    logs = tx.get("log_events") or []
+
+    # Collect all ERC20 Transfer hops in this tx
+    hops = []
+    wallet_in_erc20 = False
+    for log in logs:
+        decoded = log.get("decoded")
+        if not decoded or decoded.get("name") != "Transfer":
+            continue
+        params = {}
+        for p in (decoded.get("params") or []):
+            if p.get("name") and p.get("value") is not None:
+                params[p["name"]] = p["value"]
+        decimals = log.get("sender_contract_decimals", 0) or 0
+        amount = _to_float(_to_dec(params.get("value"), decimals))
+        if amount == 0:
+            continue
+        h_from = (params.get("from") or "").lower()
+        h_to = (params.get("to") or "").lower()
+        if wallet_lower in (h_from, h_to):
+            wallet_in_erc20 = True
+        hops.append({
+            "from": params.get("from"),
+            "to": params.get("to"),
+            "from_l": h_from,
+            "to_l": h_to,
+            "amount": amount,
+            "token_symbol": log.get("sender_contract_ticker_symbol") or "UNKNOWN",
+            "token_name": log.get("sender_name") or "Unknown",
+            "token_contract": log.get("sender_address"),
+            "token_decimals": decimals,
+        })
+
+    transfers = []
+
+    # --- Native internal transfers (bridge delivers native BNB/ETH) ---
+    # Only needed when the wallet isn't a direct ERC20 participant.
+    if chain and tx_hash and not wallet_in_erc20:
+        try:
+            internals = fetch_internal_transfers(chain, tx_hash)
+        except Exception:
+            internals = []
+        for it in internals:
+            i_from = (it.get("from_address") or "").lower()
+            i_to = (it.get("to_address") or "").lower()
+            if wallet_lower not in (i_from, i_to):
+                continue
+            amt = _to_float(_to_dec(it.get("value"), 18))
+            if amt == 0:
+                continue
+            direction = "in" if i_to == wallet_lower else "out"
+            transfers.append({
+                "from": (tx.get("from_address") if direction == "in" else it.get("from_address")),
+                "to": (it.get("to_address") if direction == "in" else it.get("to_address")),
+                "token_symbol": native_sym,
+                "token_name": native_sym,
+                "token_contract": None,
+                "token_decimals": 18,
+                "direction": direction,
+                "amount": amt,
+                "value_usd": amt * native_price if native_price else 0.0,
+                "counterparty": tx_to,       # the bridge (leftmost label)
+                "is_native": True,
+            })
+        if transfers:
+            return transfers
+
+    if not hops:
+        return []
+
+    # Final recipient = `to` of the last hop that is not itself an intermediary
+    # and not the bridge. Fall back to the very last hop's `to`.
+    final_recipient = None
+    final_hop = None
+    for h in hops:
+        if h["to_l"] and h["to_l"] not in INTERMEDIARY_ADDRESSES and h["to_l"] != tx_to_lower:
+            final_recipient = h["to"]
+            final_hop = h
+    if final_recipient is None:
+        final_hop = hops[-1]
+        final_recipient = final_hop["to"]
+
+    # Case 1: wallet initiated the bridge call (out). Show wallet -> final recipient,
+    # counterparty tagged as the bridge.
+    if tx_from == wallet_lower:
+        transfers.append({
+            "from": tx.get("from_address"),
+            "to": final_recipient,
+            "token_symbol": final_hop["token_symbol"],
+            "token_name": final_hop["token_name"],
+            "token_contract": final_hop["token_contract"],
+            "token_decimals": final_hop["token_decimals"],
+            "direction": "out",
+            "amount": final_hop["amount"],
+            "counterparty": tx_to,          # the bridge/router (leftmost label)
+        })
+        return transfers
+
+    # Case 2: wallet is the ultimate recipient of the routed funds (in).
+    # Show initiator -> wallet, counterparty tagged as the bridge.
+    for h in hops:
+        if h["to_l"] == wallet_lower:
+            transfers.append({
+                "from": tx.get("from_address"),
+                "to": h["to"],
+                "token_symbol": h["token_symbol"],
+                "token_name": h["token_name"],
+                "token_contract": h["token_contract"],
+                "token_decimals": h["token_decimals"],
+                "direction": "in",
+                "amount": h["amount"],
+                "counterparty": tx_to,
+            })
 
     return transfers
 
@@ -370,6 +538,7 @@ def extract_transfers(df: pd.DataFrame, wallet: str, prices: dict[str, float]) -
             "to_address": tx["to"],
             "value": tx["value_wei"],
             "log_events": tx["log_events"],
+            "tx_hash": tx["tx_hash"],
         }
 
         tx_type = _classify_tx(tx_dict)
@@ -404,6 +573,46 @@ def extract_transfers(df: pd.DataFrame, wallet: str, prices: dict[str, float]) -
                     "direction": t["direction"],
                     "amount": t.get("amount", 0),
                     "value_usd": usd,
+                    "counterparty": None,
+                })
+        elif tx_type == "bridge":
+            # Bridge / routed call: resolve real from -> final recipient,
+            # tag the bridge/router as the counterparty (leftmost label).
+            # Also pulls native internal transfers when the wallet only
+            # received/sent native BNB/ETH via the bridge (not in log_events).
+            bridge_transfers = _extract_bridge_transfers(
+                tx_dict, wallet_lower, chain=chain,
+                native_price=native_price, native_sym=native_sym,
+            )
+            for t in bridge_transfers:
+                if t.get("is_native"):
+                    # USD already computed from native price in the extractor.
+                    usd = t.get("value_usd", 0.0)
+                    token_type = "native"
+                else:
+                    contract = (t["token_contract"] or "").lower()
+                    token_price = prices.get(contract, 0.0)
+                    token_sym = t["token_symbol"]
+                    if not token_price and token_sym.upper() in STABLECOIN_SYMBOLS:
+                        token_price = 1.0
+                    usd = t["amount"] if token_price == 1.0 and token_sym.upper() in STABLECOIN_SYMBOLS else (t.get("amount", 0) * token_price if token_price else 0.0)
+                    token_type = "erc20"
+
+                out.append({
+                    "block_signed_at": tx["block_signed_at"],
+                    "tx_hash": tx["tx_hash"],
+                    "from": t["from"],
+                    "to": t["to"],
+                    "token_symbol": t["token_symbol"],
+                    "token_name": t["token_name"],
+                    "token_contract": t["token_contract"],
+                    "token_decimals": t["token_decimals"],
+                    "token_type": token_type,
+                    "chain": chain,
+                    "direction": t["direction"],
+                    "amount": t.get("amount", 0),
+                    "value_usd": usd,
+                    "counterparty": t.get("counterparty"),
                 })
         else:
             # Normal tx: extract all transfers
@@ -430,6 +639,7 @@ def extract_transfers(df: pd.DataFrame, wallet: str, prices: dict[str, float]) -
                     "direction": t["direction"],
                     "amount": t["amount"],
                     "value_usd": usd,
+                    "counterparty": None,
                 })
 
     return pd.DataFrame(out)
@@ -444,10 +654,17 @@ def unified_ranking(transfers: pd.DataFrame, wallet: str) -> pd.DataFrame:
 
     # --- Counterparty ranking ---
     cp = transfers.copy()
-    cp["counterparty"] = cp.apply(
-        lambda r: r["to"] if (r["from"] or "").lower() == wallet_lower else r["from"],
-        axis=1,
-    )
+    # Prefer an explicit counterparty override (e.g. bridge/router intermediary)
+    # when present; otherwise fall back to the non-wallet side of the transfer.
+    def _cp(r):
+        override = r["counterparty"]
+        # Treat NaN / None / empty as "no override"
+        if override is not None and not (isinstance(override, float) and pd.isna(override)) and str(override).strip():
+            return override
+        return r["to"] if (r["from"] or "").lower() == wallet_lower else r["from"]
+    if "counterparty" not in cp.columns:
+        cp["counterparty"] = None
+    cp["counterparty"] = cp.apply(_cp, axis=1)
     cp = cp[cp["counterparty"].notna() & (cp["counterparty"] != "")]
 
     cp_stats = cp.groupby("counterparty").agg(
@@ -503,13 +720,18 @@ def filter_by_entity(transfers: pd.DataFrame, wallet: str, entity: str, entity_t
     wallet_lower = wallet.lower()
 
     if entity_type == "address":
-        mask = transfers.apply(
-            lambda r: entity.lower() in [
+        ent = entity.lower()
+        def _match(r):
+            cp = r["counterparty"] if "counterparty" in r else None
+            if cp is None or (isinstance(cp, float) and pd.isna(cp)):
+                cp = ""
+            addrs = [
                 (r["from"] or "").lower(),
                 (r["to"] or "").lower(),
-            ] and entity.lower() != wallet_lower,
-            axis=1,
-        )
+                str(cp).lower(),
+            ]
+            return ent in addrs and ent != wallet_lower
+        mask = transfers.apply(_match, axis=1)
     else:
         mask = transfers["token_symbol"].str.lower() == entity.lower()
 

@@ -21,6 +21,7 @@ from analyzer import (
     unified_ranking,
 )
 from labels import label_or_short, get_label
+from analyzer import INTERMEDIARY_ADDRESSES, BRIDGE_ADDRESSES
 
 # --- Page config ---
 st.set_page_config(
@@ -122,6 +123,96 @@ def _address_link(addr: str) -> str:
     if label:
         return f"{label}\n({addr})"
     return addr
+
+
+def _render_pagination(total_pages: int, current_page: int, key_prefix: str,
+                       total_txs: int, start_idx: int, end_idx: int) -> None:
+    """Render clickable numbered pagination with a 5-page sliding window,
+    First/Prev/Next/Last arrows, and a manual page-jump input.
+
+    Window logic: show up to 5 page numbers centered on the current page,
+    always keeping the first and last page reachable (with ellipsis when there
+    is a gap). Examples for 14 pages:
+      p1  -> [1] 2 3 4 5 … 14
+      p4  -> 1 2 3 [4] 5 6 … 14
+      p10 -> 1 … 8 9 [10] 11 12 … 14
+      p14 -> 1 … 10 11 12 13 [14]
+    """
+    if total_pages <= 1:
+        return
+
+    st.caption(f"Showing {start_idx + 1}-{min(end_idx, total_txs)} of {total_txs} · Page {current_page + 1} / {total_pages}")
+
+    WINDOW = 5
+
+    def _page_list() -> list:
+        # Few pages: show them all.
+        if total_pages <= WINDOW + 2:
+            return list(range(total_pages))
+        start = max(0, current_page - WINDOW // 2)
+        end = min(total_pages - 1, start + WINDOW - 1)
+        start = max(0, end - WINDOW + 1)
+        out = []
+        if start > 0:
+            out.append(0)
+            if start > 1:
+                out.append(None)  # ellipsis
+        out.extend(range(start, end + 1))
+        if end < total_pages - 1:
+            if end < total_pages - 2:
+                out.append(None)  # ellipsis
+            out.append(total_pages - 1)
+        return out
+
+    page_items = _page_list()
+
+    # Layout: [First][Prev] [numbers...] [Next][Last]
+    n_slots = len(page_items)
+    col_specs = [1, 1] + [1] * n_slots + [1, 1]
+    cols = st.columns(col_specs)
+
+    with cols[0]:
+        if st.button("⏮", key=f"{key_prefix}_first", help="First page", disabled=current_page == 0):
+            st.session_state["tx_page"] = 0
+            st.rerun()
+    with cols[1]:
+        if st.button("◀", key=f"{key_prefix}_prev", help="Previous", disabled=current_page == 0):
+            st.session_state["tx_page"] = max(0, current_page - 1)
+            st.rerun()
+
+    for i, p in enumerate(page_items):
+        with cols[2 + i]:
+            if p is None:
+                st.markdown("<div style='text-align:center;padding-top:8px'>…</div>", unsafe_allow_html=True)
+            elif p == current_page:
+                st.button(f"【{p + 1}】", key=f"{key_prefix}_cur_{p}", disabled=True)
+            else:
+                if st.button(f"{p + 1}", key=f"{key_prefix}_p_{p}"):
+                    st.session_state["tx_page"] = p
+                    st.rerun()
+
+    with cols[2 + n_slots]:
+        if st.button("▶", key=f"{key_prefix}_next", help="Next", disabled=current_page >= total_pages - 1):
+            st.session_state["tx_page"] = min(total_pages - 1, current_page + 1)
+            st.rerun()
+    with cols[3 + n_slots]:
+        if st.button("⏭", key=f"{key_prefix}_last", help="Last page", disabled=current_page >= total_pages - 1):
+            st.session_state["tx_page"] = total_pages - 1
+            st.rerun()
+
+    # Manual jump: number input + Go button (only worth showing for many pages).
+    if total_pages > WINDOW + 2:
+        jc1, jc2, jc3 = st.columns([2, 1, 6])
+        with jc1:
+            target = st.number_input(
+                "Jump to page", min_value=1, max_value=total_pages,
+                value=current_page + 1, step=1, key=f"{key_prefix}_jump_input",
+                label_visibility="collapsed",
+            )
+        with jc2:
+            if st.button("Go", key=f"{key_prefix}_jump_go"):
+                st.session_state["tx_page"] = int(target) - 1
+                st.rerun()
 
 
 def _token_in_swap(swap_str: str, token_symbol: str) -> bool:
@@ -238,9 +329,9 @@ if fetch_btn or "df_tx" in st.session_state:
                 # tx hash link
                 ff_explorer = CHAIN_EXPLORER.get(ff_chain, "")
                 if ff_explorer:
-                    st.caption(f"tx: [{first_fund['tx_hash'][:30]}...]({ff_explorer}{first_fund['tx_hash']}) | chain: {ff_chain}")
+                    st.caption(f"tx: [{first_fund['tx_hash']}]({ff_explorer}{first_fund['tx_hash']}) | chain: {ff_chain}")
                 else:
-                    st.caption(f"tx: {first_fund['tx_hash'][:30]}... | chain: {ff_chain}")
+                    st.caption(f"tx: {first_fund['tx_hash']} | chain: {ff_chain}")
                 
                 # Button to trace fund chain (manual, not auto)
                 if st.button("🔗 Trace Fund Chain"):
@@ -364,9 +455,9 @@ if fetch_btn or "df_tx" in st.session_state:
                             with c3:
                                 explorer_url = CHAIN_EXPLORER.get(chain_tag, "")
                                 if explorer_url:
-                                    st.markdown(f"[tx: {swap['tx_hash'][:10]}...]({explorer_url}{swap['tx_hash']})")
+                                    st.markdown(f"[tx: {swap['tx_hash']}]({explorer_url}{swap['tx_hash']})")
                                 else:
-                                    st.caption(f"tx: {swap['tx_hash'][:18]}...")
+                                    st.caption(f"tx: {swap['tx_hash']}")
 
                             st.markdown("---")
 
@@ -558,7 +649,7 @@ if fetch_btn or "df_tx" in st.session_state:
                     chain_color = CHAIN_COLORS.get(tx["chain"], "#888")
                     explorer_url = CHAIN_EXPLORER.get(tx["chain"], "")
                     tx_hash = tx["tx_hash"]
-                    tx_link = f"[{tx_hash[:10]}...]({explorer_url}{tx_hash})"
+                    tx_link = f"[{tx_hash}]({explorer_url}{tx_hash})"
 
                     col_time, col_main, col_gas = st.columns([2, 6, 2])
 
@@ -592,48 +683,100 @@ if fetch_btn or "df_tx" in st.session_state:
                                 if not outs.empty:
                                     for _, t in outs.iterrows():
                                         usd_str = f" (${t['value_usd']:,.2f})" if t["value_usd"] > 0 else ""
-                                        cp_addr = t["to"] or ""
+                                        cp_override = t["counterparty"] if "counterparty" in t and pd.notna(t["counterparty"]) and str(t["counterparty"]).strip() else None
+                                        cp_addr = (cp_override or t["to"]) or ""
                                         cp_display = _address_link(cp_addr)
-                                        st.markdown(f"🔴 -{t['amount']:,.4f} {t['token_symbol']}{usd_str}")
-                                        st.caption(f"→ {cp_display}")
+                                        tsym = t["token_symbol"]
+                                        tc1, tc2 = st.columns([5, 2])
+                                        with tc1:
+                                            st.markdown(f"🔴 -{t['amount']:,.4f} {tsym}{usd_str}")
+                                            st.caption(f"→ {cp_display}")
+                                        with tc2:
+                                            if tsym and st.button(f"📊 {tsym}", key=f"tok_out_{t['tx_hash']}_{t.name}", help=f"Filter all {tsym} transfers"):
+                                                st.session_state["drill_entity"] = tsym
+                                                st.session_state["drill_type"] = "token"
+                                                st.rerun()
                                         if st.button(f"🔍 Analyze {cp_addr[:10]}...", key=f"btn_out_{t['tx_hash']}_{t.name}"):
                                             st.session_state["pending_address"] = cp_addr
                                             st.rerun()
                                 if not ins.empty:
                                     for _, t in ins.iterrows():
                                         usd_str = f" (${t['value_usd']:,.2f})" if t["value_usd"] > 0 else ""
-                                        cp_addr = t["from"] or ""
+                                        cp_override = t["counterparty"] if "counterparty" in t and pd.notna(t["counterparty"]) and str(t["counterparty"]).strip() else None
+                                        cp_addr = (cp_override or t["from"]) or ""
                                         cp_display = _address_link(cp_addr)
-                                        st.markdown(f"🟢 +{t['amount']:,.4f} {t['token_symbol']}{usd_str}")
-                                        st.caption(f"← {cp_display}")
+                                        tsym = t["token_symbol"]
+                                        tc1, tc2 = st.columns([5, 2])
+                                        with tc1:
+                                            st.markdown(f"🟢 +{t['amount']:,.4f} {tsym}{usd_str}")
+                                            st.caption(f"← {cp_display}")
+                                        with tc2:
+                                            if tsym and st.button(f"📊 {tsym}", key=f"tok_in_{t['tx_hash']}_{t.name}", help=f"Filter all {tsym} transfers"):
+                                                st.session_state["drill_entity"] = tsym
+                                                st.session_state["drill_type"] = "token"
+                                                st.rerun()
                                         if st.button(f"🔍 Analyze {cp_addr[:10]}...", key=f"btn_in_{t['tx_hash']}_{t.name}"):
                                             st.session_state["pending_address"] = cp_addr
                                             st.rerun()
                             else:
-                                # Check for Approval events
-                                has_approval = False
+                                # Bridge / router interaction: if the tx `to` is a known
+                                # bridge/router/aggregator, label it clearly at the left.
+                                tx_to_addr = (tx["to"] or "")
+                                is_intermediary = tx_to_addr.lower() in BRIDGE_ADDRESSES
+                                if is_intermediary:
+                                    bridge_label = get_label(tx_to_addr) or label_or_short(tx_to_addr)
+                                    st.markdown(
+                                        f"**🌉 {bridge_label}** <span style='color:#999;font-size:12px'>via {label_or_short(tx_to_addr)}</span>",
+                                        unsafe_allow_html=True,
+                                    )
+
+                                # Collect Approve events and collapse them (spam reduction).
+                                approvals = []
                                 for log in tx["log_events"]:
                                     decoded = log.get("decoded")
-                                    if decoded and decoded.get("name") == "Approval":
-                                        has_approval = True
-                                        params = {}
-                                        for p in (decoded.get("params") or []):
-                                            if p.get("name") and p.get("value") is not None:
-                                                params[p["name"]] = p["value"]
-                                        token_sym = log.get("sender_contract_ticker_symbol") or ""
-                                        spender = params.get("spender", "")
+                                    if not decoded or decoded.get("name") != "Approval":
+                                        continue
+                                    params = {}
+                                    for p in (decoded.get("params") or []):
+                                        if p.get("name") and p.get("value") is not None:
+                                            params[p["name"]] = p["value"]
+                                    token_sym = log.get("sender_contract_ticker_symbol") or ""
+                                    spender = params.get("spender", "")
+                                    amount_raw = params.get("value", "0")
+                                    decimals = log.get("sender_contract_decimals", 0) or 0
+                                    amount = float(amount_raw) / (10 ** decimals) if amount_raw else 0
+                                    if amount == 0:
+                                        continue
+                                    approvals.append((token_sym, spender, amount))
+
+                                has_approval = len(approvals) > 0
+                                if has_approval:
+                                    # Group by (token, spender); show max amount per group.
+                                    grouped = {}
+                                    for token_sym, spender, amount in approvals:
+                                        key = (token_sym, spender)
+                                        grouped[key] = max(grouped.get(key, 0), amount)
+
+                                    total_approves = len(approvals)
+                                    uniq = len(grouped)
+                                    if total_approves > 1:
+                                        # Collapsed summary line + expandable detail
+                                        header = f"📋 {total_approves}× Approve"
+                                        # Summarize dominant token
+                                        toks = {t for (t, _), _ in grouped.items()}
+                                        tok_str = list(toks)[0] if len(toks) == 1 else "tokens"
+                                        st.markdown(f"{header} {tok_str} <span style='color:#999;font-size:12px'>({uniq} unique spender{'s' if uniq != 1 else ''}, click to expand)</span>", unsafe_allow_html=True)
+                                        with st.expander("Show approvals"):
+                                            for (token_sym, spender), amount in sorted(grouped.items(), key=lambda kv: -kv[1]):
+                                                spender_label = label_or_short(spender) if spender else ""
+                                                amt_str = "∞" if amount > 1e15 else f"{amount:,.2f}"
+                                                st.write(f"📋 Approve {amt_str} {token_sym} → {spender_label}")
+                                    else:
+                                        (token_sym, spender), amount = next(iter(grouped.items()))
                                         spender_label = label_or_short(spender) if spender else ""
-                                        amount_raw = params.get("value", "0")
-                                        decimals = log.get("sender_contract_decimals", 0) or 0
-                                        amount = float(amount_raw) / (10 ** decimals) if amount_raw else 0
-                                        if amount == 0:
-                                            continue
-                                        if amount > 1e15:
-                                            amt_str = "∞"
-                                        else:
-                                            amt_str = f"{amount:,.2f}"
+                                        amt_str = "∞" if amount > 1e15 else f"{amount:,.2f}"
                                         st.write(f"📋 Approve {amt_str} {token_sym} → {spender_label}")
-                                
+
                                 if not has_approval:
                                     val_eth = float(tx["value_eth"])
                                     if val_eth > 0:
@@ -659,8 +802,9 @@ if fetch_btn or "df_tx" in st.session_state:
 
                     st.markdown("---")
 
-                if len(tx_window) > display_count:
-                    st.caption(f"Showing first {display_count} of {len(tx_window)} transactions. Use date filter to narrow down.")
+                # Pagination controls (list view)
+                if total_pages > 1:
+                    _render_pagination(total_pages, current_page, "lpg", total_txs, start_idx, end_idx)
 
         elif mode.startswith("📋"):
             # --- Transactions Mode (table view) ---
@@ -698,25 +842,7 @@ if fetch_btn or "df_tx" in st.session_state:
 
             # Pagination controls
             if total_pages > 1:
-                    pcol1, pcol2, pcol3, pcol4, pcol5 = st.columns([1, 1, 2, 1, 1])
-                    with pcol1:
-                        if st.button("⏮ First", key="pg_first"):
-                            st.session_state["tx_page"] = 0
-                            st.rerun()
-                    with pcol2:
-                        if st.button("◀ Prev", key="pg_prev") and current_page > 0:
-                            st.session_state["tx_page"] -= 1
-                            st.rerun()
-                    with pcol3:
-                        st.markdown(f"<div style='text-align:center;padding-top:8px'>Page **{current_page + 1}** / {total_pages} &nbsp; (showing {start_idx+1}-{min(end_idx, total_txs)} of {total_txs})</div>", unsafe_allow_html=True)
-                    with pcol4:
-                        if st.button("Next ▶", key="pg_next") and current_page < total_pages - 1:
-                            st.session_state["tx_page"] += 1
-                            st.rerun()
-                    with pcol5:
-                        if st.button("Last ⏭", key="pg_last"):
-                            st.session_state["tx_page"] = total_pages - 1
-                            st.rerun()
+                _render_pagination(total_pages, current_page, "pg", total_txs, start_idx, end_idx)
 
         # --- Export ---
         st.divider()

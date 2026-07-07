@@ -133,6 +133,8 @@ BRIDGES = {
     "0xc31fc94f3fd088ee53ac915d6e8a14ff25a23c47": "deBridge: Crosschain Receiver",
     # Hop Protocol
     "0xb8901acb165ed027e32754e50ffe1569be7a4b53": "Hop Bridge",
+    # Butter Network
+    "0x0000317bec33af037b5fab2028f52d14658f6a56": "Butter Bridge V3.1",
 }
 
 # ====== Lending Protocols (verified) ======
